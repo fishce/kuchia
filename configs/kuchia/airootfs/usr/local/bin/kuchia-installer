@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# kuchia-installer - install Kuchia (Arch-based) to disk
+set -e
+
+[[ $EUID -eq 0 ]] || { echo "run as root"; exit 1; }
+command -v pacstrap >/dev/null || { echo "pacstrap not found"; exit 1; }
+ping -c1 -W3 archlinux.org >/dev/null 2>&1 || { echo "no internet?"; read -p "continue anyway? [y/N] " r; [[ $r == y ]] || exit 1; }
+
+echo "=== Kuchia Installer ==="
+echo "Available disks:"
+lsblk -d -o NAME,SIZE,MODEL | grep -v loop
+read -p "Target disk (e.g. sda, nvme0n1, vda): " DISK
+DISK="/dev/${DISK}"
+[[ -b $DISK ]] || { echo "bad disk"; exit 1; }
+read -p "WIPE ALL DATA on $DISK? [y/N] " r; [[ $r == y ]] || exit 1
+read -p "Hostname [kuchia]: " HOST; HOST=${HOST:-kuchia}
+read -p "Username [kuchia]: " USER; USER=${USER:-kuchia}
+read -s -p "Password for $USER and root: " PASS; echo
+read -p "Timezone [UTC]: " TZ; TZ=${TZ:-UTC}
+read -p "Filesystem for / (ext4/btrfs) [ext4]: " FS; FS=${FS:-ext4}
+read -p "Create swap file of size in GiB (0=none) [2]: " SWAP; SWAP=${SWAP:-2}
+read -p "Add extra packages (space separated, blank=none): " EXTRA
+read -p "Kernel (linux-zen/linux/linux-lts) [linux-zen]: " KERN; KERN=${KERN:-linux-zen}
+
+# partition
+parted -s "$DISK" mklabel gpt
+parted -s "$DISK" mkpart ESP fat32 1MiB 513MiB
+parted -s "$DISK" set 1 esp on
+parted -s "$DISK" mkpart root $FS 513MiB 100%
+P1="${DISK}1"; P2="${DISK}2"
+[[ $DISK == *nvme* || $DISK == *mmcblk* ]] && { P1="${DISK}p1"; P2="${DISK}p2"; }
+
+mkfs.fat -F32 "$P1"
+case "$FS" in
+    btrfs) mkfs.btrfs -f "$P2"; mount -o subvolid=5 "$P2" /mnt; btrfs subvolume create /mnt/@; umount /mnt; mount -o subvol=@ "$P2" /mnt ;;
+    *) mkfs.ext4 -F "$P2"; mount "$P2" /mnt ;;
+esac
+mkdir -p /mnt/boot/efi
+mount "$P1" /mnt/boot/efi
+
+pacstrap -K /mnt base $KERN linux-firmware grub efibootmgr networkmanager sudo base-devel git $EXTRA
+genfstab -U /mnt >> /mnt/etc/fstab
+
+arch-chroot /mnt /bin/bash -c "
+ln -sf /usr/share/zoneinfo/$TZ /etc/localtime
+hwclock --systohc
+echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen
+locale-gen
+echo 'LANG=en_US.UTF-8' > /etc/locale.conf
+echo '$HOST' > /etc/hostname
+echo \"root:$PASS\" | chpasswd
+useradd -m -G wheel -s /bin/bash '$USER'
+echo \"$USER:$PASS\" | chpasswd
+sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
+grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=kuchia
+grub-mkconfig -o /boot/grub/grub.cfg
+systemctl enable NetworkManager
+"
+
+# swap file
+if [[ "$SWAP" != "0" ]]; then
+    fallocate -l ${SWAP}G /mnt/swapfile || dd if=/dev/zero of=/mnt/swapfile bs=1G count=$SWAP
+    chmod 600 /mnt/swapfile
+    mkswap /mnt/swapfile
+    swapon /mnt/swapfile
+    echo '/swapfile none swap defaults 0 0' >> /mnt/etc/fstab
+fi
+
+# brand the installed system as Kuchia
+cp /usr/local/bin/koi /mnt/usr/local/bin/koi
+cp /usr/lib/os-release /mnt/usr/lib/os-release
+cp /etc/motd /mnt/etc/motd
+
+echo "Install finished. Reboot and remove the ISO."

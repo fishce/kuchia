@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# koi - package manager: pacman for repos, AUR auto-fallback (makepkg/yay)
+set -e
+
+auto_update() {
+    if [[ $EUID -eq 0 ]]; then pacman -Syu; else sudo pacman -Syu; fi
+    if command -v yay >/dev/null 2>&1; then yay -Sua
+    else echo "(install yay for AUR updates)"; fi
+}
+
+aur_install() {
+    if [[ $EUID -eq 0 ]]; then
+        echo "Run koi as a regular sudo user so makepkg can build (root is not allowed by makepkg)."
+        exit 1
+    fi
+    if command -v yay >/dev/null 2>&1; then yay -S --needed "$@"
+    else
+        local pkg tmp
+        for pkg in "$@"; do
+            echo "==> '$pkg' not in repos; building from AUR..."
+            tmp=$(mktemp -d)
+            git clone --depth 1 "https://aur.archlinux.org/${pkg}.git" "$tmp/$pkg"
+            (cd "$tmp/$pkg" && makepkg -si --noconfirm)
+            rm -rf "$tmp"
+        done
+    fi
+}
+
+[[ $# -eq 0 ]] && { auto_update; exit; }
+
+cmd="$1"; shift
+aurflag=0
+if [[ "$cmd" == *a* && "$cmd" != --* ]]; then aurflag=1; cmd="${cmd//a/}"; fi
+
+case "$cmd" in
+    -S)
+        repo=(); aur=()
+        for p in "$@"; do
+            if pacman -Si "$p" &>/dev/null; then repo+=("$p"); else aur+=("$p"); fi
+        done
+        if (( ${#repo[@]} )); then
+            [[ $EUID -eq 0 ]] && pacman -S --needed --noconfirm "${repo[@]}" || sudo pacman -S --needed --noconfirm "${repo[@]}"
+        fi
+        (( ${#aur[@]} )) && aur_install "${aur[@]}"
+        ;;
+    -Sy|-Syu|-Syuu) auto_update ;;
+    -Ss)
+        pacman -Ss "$@"
+        if (( aurflag )) && command -v yay >/dev/null 2>&1; then yay -Ss --aur "$@"; fi
+        ;;
+    -Si|-Qi|-Ql|-Qs)
+        pacman "$cmd" "$@"
+        if (( aurflag )) && command -v yay >/dev/null 2>&1; then yay "$cmd" --aur "$@"; fi
+        ;;
+    -Qu|-Su)
+        if command -v yay >/dev/null 2>&1; then yay "${cmd}a"; else pacman "$cmd"; fi
+        ;;
+    *)
+        if command -v yay >/dev/null 2>&1; then yay "$cmd" "$@"; else pacman "$cmd" "$@"; fi
+        ;;
+esac

@@ -1,0 +1,5 @@
+Welcome to Kuchia! 🐟
+
+  kuchia-installer   install Kuchia to disk
+  koi                package manager (auto-updates, auto-AUR)
+  fastfetch          system info + Kuchia art
